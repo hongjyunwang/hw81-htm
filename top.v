@@ -1,0 +1,1 @@
+// On the way back up: l1_ready_o, l1_data_o, ACK_o, invalidate_o from the directory need to be routed to the correct L1 instance based on l1_core_o

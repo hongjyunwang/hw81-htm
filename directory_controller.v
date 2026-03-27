@@ -16,17 +16,19 @@ module directory_controller #(
     parameter CACHE_LINE_SIZE = 64, // 64 bytes per cache line
     parameter ADDR_WIDTH = 32 // 32-bit addresses
 )(
-    input wire clk_i;
-    input wire reset_i;
+    input wire clk_i,
+    input wire reset_i,
 
     // Control signals
     input wire [CORE_ID_BITS-1:0] core_i, // The core doing the request
-    input wire [1:0] nomral_req_i // 00: ld_miss_i, 01: sd_miss_i, 10: sd_hit_i
+    input wire [2:0] coh_req_i,
 
     // input wire transaction_i,
     // input wire tx_begin_i,
     // input wire tx_end_i,
 
+    // Input from L1 cache
+    input wire l1_valid_i, // L1 is presenting a real request
     input wire [ADDR_WIDTH-1:0] addr_i, // address from coherence request
 
     // Downward fetch/return interface with mem (L2)
@@ -49,32 +51,33 @@ module directory_controller #(
 localparam NUM_ENTRIES = NUM_CORES * CACHE_ENTRIES_PER_CORE; // Total number of directory entries
 localparam LINE_WIDTH  = 8 * CACHE_LINE_SIZE;
 localparam OFFSET_BITS = $clog2(CACHE_LINE_SIZE); // Byte-offset bits in cache line
-localparam INDEX_BITS  = $clog2(NUM_ENTRIES); // Index into each directory entry
+localparam INDEX_BITS  = $clog2(CACHE_ENTRIES_PER_CORE); // Index into each cache line
 localparam TAG_BITS  = ADDR_WIDTH - OFFSET_BITS - INDEX_BITS;
 
+// ================ One-hot State encoding ================
+localparam [2:0] STATE_I = 3'b001; // Invalid
+localparam [2:0] STATE_S = 3'b010; // Shared
+localparam [2:0] STATE_M = 3'b100; // Modified
+
 // ================ Directory Entry Layout ================
-// [tag (20 bits) | state (2 bits) | Π presence vector (CORE_ID_BITS bits)]
-localparam ENTRY_WIDTH = TAG_BITS + 2 + CORE_ID_BITS;
+// [tag (20 bits) | state (3 bits) | Π presence vector (CORE_ID_BITS bits)]
+localparam ENTRY_WIDTH = TAG_BITS + 3 + CORE_ID_BITS;
 localparam T_IDX = NUM_CORES;
 
-// ================ One-hot State encoding ================
-localparam [1:0] STATE_I = 2'b01; // Invalid
-localparam [1:0] STATE_S = 2'b10; // Shared
-localparam [1:0] STATE_M = 2'b11; // Modified
-
 // ================ Request Types ================
-localparam REQ_LD_MISS = 2'b00;
-localparam REQ_SD_MISS = 2'b01;
-localparam REQ_SD_HIT  = 2'b10;
-
+localparam REQ_LD_HIT = 3'b000;
+localparam REQ_LD_MISS = 3'b001;
+localparam REQ_SD_HIT  = 3'b010;
+localparam REQ_SD_MISS = 3'b100;
 
 // ================ FSM states and modes ================
 localparam [3:0]
     S_IDLE = 4'd0, // Waiting for a new request
     S_PROCESS = 4'd1, // Read directory, decide action
-    S_LD_MISS = 4'd2;
-    S_SD_MISS = 4'd3;
-    S_SD_HIT = 4'd4;
+    S_LD_HIT = 4'd2,
+    S_LD_MISS = 4'd3,
+    S_SD_MISS = 4'd4,
+    S_SD_HIT = 4'd5;
 
 localparam NORMAL_MODE = 1'b0;
 localparam TRANSACTION_MODE = 1'b1;
@@ -123,9 +126,15 @@ always @(posedge clk_i or posedge reset_i) begin
         case (state)
 
             S_IDLE: begin
-                // Waiting for a new request
+                if (l1_valid_i) begin
+                    // Latch the request fields stably for the rest of the FSM
+                    req_core <= core_i;
+                    req_type <= normal_req_i;
+                    req_addr <= addr_i;
+                    cur_entry <= directory[dir_idx];
+                    state <= S_PROCESS;
+                end
             end
-
 
             default: state <= S_IDLE;
 
