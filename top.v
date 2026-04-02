@@ -1,7 +1,6 @@
 // On the way back up: l1_ready_o, l1_data_o, ACK_o, invalidate_o from the directory need to be routed to the correct L1 instance based on l1_core_o
 
-module top(
-    parameter CORE_ID,
+module top #(
     parameter NUM_CORES = 2,
     parameter CORE_ID_BITS = 1,
 
@@ -12,98 +11,121 @@ module top(
     input clk,
     input rst,
 
-    // external CPU inputs
-    input wire cpu_signal, // Handshake: a real cpu request is present
-    input wire [ADDR_WIDTH-1:0] addr, // address from CPU request
-    input wire req, // 0: ld, 1: sd
-    input wire [CORE_ID_BITS-1:0] core, // The requesting core
+    // CPU-facing ports
+    input wire cpu_req_valid, // renamed: was cpu_signal (collision)
+    input wire [ADDR_WIDTH-1:0] cpu_addr,
+    input wire cpu_req, // 0=ld, 1=sd
+    input wire [CORE_ID_BITS-1:0] cpu_core,
 
-    // external CPU outputs
-    output wire cpu_ready, // Handshake: CPU can issue a new request
-    output reg cpu_signal, // Handshake: data is ready to be sent to CPU
-    output reg [(8*CACHE_LINE_SIZE)-1:0] cpu_data // cache line output to the CPU
+    output wire cpu_ready,
+    output wire cpu_resp_valid, // renamed: was cpu_signal
+    output wire [(8*CACHE_LINE_SIZE)-1:0] cpu_data,
+
+    // L2-facing ports
+    input wire l2_signal_i,
+    input wire [(8*CACHE_LINE_SIZE)-1:0] l2_rdata_i,
+
+    output wire l2_req_o,
+    output wire l2_we_o,
+    output wire [ADDR_WIDTH-1:0] l2_addr_o,
+    output wire [(8*CACHE_LINE_SIZE)-1:0] l2_wdata_o
 )
 
 // ================ Internal Wires ================
 // Naming for some of the wires: sender_receiver_wireName
 wire dc_l1_data_signal;
 wire [(8*CACHE_LINE_SIZE)-1:0] dc_l1_data;
+wire [CORE_ID_BITS-1:0] dc_l1_data_core;
 wire [1:0] dg_signal;
 wire [CORE_ID_BITS-1:0] dg_core;
 wire [ADDR_WIDTH-1:0] dg_addr;
 
+wire l1_dc_dignal;
+wire [NUM_CORES-1:0] l1_dc_core; // The core doing the request (one hot)
+wire [ADDR_WIDTH-1:0] l1_dc_addr; // address sent down to directory controller
+wire [2:0] l1_dc_coh_req;
+wire [(8*CACHE_LINE_SIZE)-1:0] l1_dc_l2_data; // data to pass to L2 for writeback
+wire l1_dg_ack; // acknowledge that the downgrade has been completed
 
 
-l1 l1_a (
-    .CORE_ID(0)
-)(
-    .clk_i(clk),
-    .reset_i(rst),
+// ================ Output Mux (core -> CPU) ================
+// Route the responding core's outputs back to the CPU
+assign cpu_ready = cpu_ready_per_core[cpu_core];
+assign cpu_resp_valid = cpu_resp_valid_per_core[cpu_core];
+assign cpu_data = cpu_data_per_core[cpu_core];
 
-    // Input from the processor
-    cpu_signal_i(cpu_signal), // Handshake: a real cpu request is present
-    addr_i(addr), // address from CPU request
-    req_i(req), // 0: ld, 1: sd
-    core_i(core), // The requesting core
 
-    // Input from the directory controller
-    dc_signal_i(dc_l1_data_signal), // Handshake: signaled when data is received from directory controller
-    l1_data_i(dc_l1_data), // Fetched cache line
-    dg_signal_i(dg_signal), // Invalidate signal
-    l1_dg_core_i(dg_core), // Target core for invalidate signal
-    l1_dg_addr_i(dg_addr), // Target address to be downgraded
+// ================ L1 Instances ================
+genvar i;
+generate
+    for (i = 0; i < NUM_CORES; i = i + 1) begin : l1_gen
+        l1 #(.CORE_ID(i)) l1_inst (
+            .clk_i(clk),
+            .reset_i(rst),
 
-    // Output to the processor
-    cpu_ready_o(cpu_ready), // Handshake: CPU can issue a new request
-    cpu_signal_o(cpu_signal), // Handshake: data is ready to be sent to CPU
-    cpu_data_o(cpu_data), // cache line output to the CPU
+            // From CPU (gated by core select)
+            .cpu_signal_i(cpu_req_valid && (cpu_core == i)),
+            .addr_i(cpu_addr),
+            .req_i(cpu_req),
+            .core_i(cpu_core),
 
-    // Output to the directory controller
-    output reg dc_signal_o, // Handshake: tells directory a real request is present
-    output wire [NUM_CORES-1:0] core_o, // The core doing the request (one hot)
-    output wire [ADDR_WIDTH-1:0] addr_o, // address sent down to directory controller
-    output reg [2:0] coh_req_o,
-    output wire [(8*CACHE_LINE_SIZE)-1:0] l2_data_o, // data to pass to L2 for writeback
-    output wire l1_dg_ack_o // acknowledge that the downgrade has been completed
-);
+            // From DC (data return; each core checks dc_l1_core)
+            .dc_signal_i(dc_l1_signal),
+            .l1_core_i(dc_l1_core),
+            .l1_data_i(dc_l1_data),
+
+            // From DC (downgrade/invalidate)
+            .dg_signal_i(dg_signal),
+            .l1_dg_core_i(dg_core),
+            .l1_dg_addr_i(dg_addr),
+
+            // To CPU
+            .cpu_ready_o(cpu_ready_per_core[i]),
+            .cpu_signal_o(cpu_resp_valid_per_core[i]),
+            .cpu_data_o(cpu_data_per_core[i]),
+
+            // To DC (arbitrated, only 1 core requests at a time for now)
+            .dc_signal_o(l1_dc_signal),
+            .core_o(l1_dc_core),
+            .addr_o(l1_dc_addr),
+            .coh_req_o(l1_dc_coh_req),
+            .l2_data_o(l1_dc_wdata),
+            .l1_dg_ack_o(l1_dg_ack)
+        );
+    end
+endgenerate
+
+
 
 directory_controller dc(
-    // all parameters default
-)(
     .clk_i(clk),
     .reset_i(rst),
 
     // Input from L1 cache
-    input wire l1_signal_i, // Handshake: L1 is presenting a real coherent request
-    input wire [NUM_CORES-1:0] core_i, // The core doing the request (one hot)
-    input wire [2:0] coh_req_i,
-    input wire [ADDR_WIDTH-1:0] addr_i, // address from coherence request
-    input wire [(8*CACHE_LINE_SIZE)-1:0] l1_data_i // Complete cache line being written downward to l2 (just data portion)
-    input wire l1_dg_ack_i, // acknowledge that the downgrade has been completed
+    .l1_signal_i(l1_dc_dignal), // Handshake: L1 is presenting a real coherent request
+    .core_i(l1_dc_core), // The core doing the request (one hot)
+    .addr_i(l1_dc_addr), // address from coherence request
+    .coh_req_i(l1_dc_coh_req),
+    .l1_data_i(l1_dc_l2_data), // Complete cache line being written downward to l2 (just data portion)
+    .l1_dg_ack_i(l1_dg_ack), // acknowledge that the downgrade has been completed
 
     // Input from L2
-    input wire l2_signal_i, // Handshake: L2 has data ready
-    input wire [(8*CACHE_LINE_SIZE)-1:0] mem_rdata_i, // Complete cache line returned from lower memory
-
-
-
+    .l2_signal_i(l2_signal_i), // Handshake: L2 has data ready
+    .mem_rdata_i(l2_rdata_i), // Complete cache line returned from lower memory
 
     // Output to L1 cache
-    l1_signal_o(dc_l1_data_signal), // Handshake: Ready signal for data, meaning controller finished its tasks (I think this is the ACK?)
-    output reg [CORE_ID_BITS-1:0] l1_core_o, // Target core for data
-    l1_data_o(dc_l1_data), // Fetched complete cache line
-    l1_dg_signal_o(dg_signal), // Downgrade signal
-    l1_dg_core_o(dg_core), // Target core for invalidate signal
-    l1_dg_addr_o(dg_addr), // Target address to be downgraded
+    .l1_signal_o(dc_l1_data_signal), // Handshake: Ready signal for data, meaning controller finished its tasks (I think this is the ACK?)
+    .l1_core_o(dc_l1_data_core), // Target core for data
+    .l1_data_o(dc_l1_data), // Fetched complete cache line
+    .l1_dg_signal_o(dg_signal), // Downgrade signal
+    .l1_dg_core_o(dg_core), // Target core for invalidate signal
+    .l1_dg_addr_o(dg_addr), // Target address to be downgraded
 
-
-
-
-    // Output to L2    
-    output reg l2_req_o, // Making downward memory request
-    output reg l2_we_o, // 1 = write req, 0 = read req
-    output reg [ADDR_WIDTH-1:0] mem_addr_o, // Data address to fetch
-    output wire [(8*CACHE_LINE_SIZE)-1:0] l2_data_o // Complete cache line being written downward to l2 (just data portion)
+    // Output to L2
+    .l2_req_o(l2_req_o), // Making downward memory request
+    .l2_we_o(l2_we_o), // 1 = write req, 0 = read req
+    .mem_addr_o(l2_addr_o), // Data address to fetch
+    .l2_data_o(l2_wdata_o) // Complete cache line being written downward to l2 (just data portion)
 );
 
 

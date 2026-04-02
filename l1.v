@@ -25,6 +25,7 @@ module l1 #(
     // Input from the directory controller
     input dc_signal_i, // Handshake: signaled when data is sent in from the directory controller
     input [(8*CACHE_LINE_SIZE)-1:0] l1_data_i, // Fetched cache line
+    input [CORE_ID_BITS-1:0] l1_core_i, // Target core for data
     input [1:0] dg_signal_i, // Invalidate signal
     input [CORE_ID_BITS-1:0] l1_dg_core_i, // Target core for invalidate signal
     input [ADDR_WIDTH-1:0] l1_dg_addr_i, // Target address to be downgraded
@@ -41,7 +42,7 @@ module l1 #(
     output reg [2:0] coh_req_o,
     output wire [(8*CACHE_LINE_SIZE)-1:0] l2_data_o, // data to pass to L2 for writeback
     output wire l1_dg_ack_o // acknowledge that the downgrade has been completed
-);
+); 
 
 // ================ Derived Parameters ================
 // Address parsing
@@ -173,7 +174,7 @@ always @(posedge clk_i or posedge reset_i) begin
             L1_WAIT: begin
                 // Block all new CPU requests until the miss is resolved
                 // dc_signal_i should only be sent in L1_WAIT state
-                if (dc_signal_i) begin
+                if ((l1_core_i == core_i)&& dc_signal_i) begin
 
                     // Write in fetched data
                     entries[latched_index][LINE_WIDTH-1:0] <= l1_data_i;
