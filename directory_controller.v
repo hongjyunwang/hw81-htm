@@ -28,25 +28,27 @@ module directory_controller #(
     input wire [NUM_CORES-1:0] core_i, // The core doing the request (one hot)
     input wire [2:0] coh_req_i,
     input wire [ADDR_WIDTH-1:0] addr_i, // address from coherence request
-    output reg [(8*CACHE_LINE_SIZE)-1:0] l1_data_o, // Complete cache line being written downward (just data portion)
+    input wire [(8*CACHE_LINE_SIZE)-1:0] l1_data_i // Complete cache line being written downward to l2 (just data portion)
+    input wire l1_dg_ack_i, // acknowledge that the downgrade has been completed
 
     // Input from L2
     input wire l2_signal_i, // Handshake: L2 has data ready
     input wire [(8*CACHE_LINE_SIZE)-1:0] mem_rdata_i, // Complete cache line returned from lower memory
 
     // Output to L1 cache
-    output reg l1_signal_o, // Handshake: Ready signal for data
+    output reg l1_signal_o, // Handshake: Ready signal for data, meaning controller finished its tasks (I think this is the ACK?)
     output reg [CORE_ID_BITS-1:0] l1_core_o, // Target core for data
     output reg [(8*CACHE_LINE_SIZE)-1:0] l1_data_o, // Fetched complete cache line
-    output reg l1_inv_signal_o, // Invalidate signal
-    output reg [CORE_ID_BITS-1:0] l1_inv_core_o, // Target core for invalidate signal
-    // Dont need to pass down type of downgrade bc that can be inferred from the request type
+    output reg [1:0] l1_dg_signal_o, // Downgrade signal
+    // l1_dg_signal_o: 00 -> no signal, 01 -> LD_MISS (downgrade to S), 10 -> SD_MISS (invalidate), 11 -> SD_HIT (invalidate)
+    output reg [CORE_ID_BITS-1:0] l1_dg_core_o, // Target core for invalidate signal
+    output wire [ADDR_WIDTH-1:0] l1_dg_addr_o, // Target address to be downgraded
 
     // Output to L2    
     output reg l2_req_o, // Making downward memory request
     output reg l2_we_o, // 1 = write req, 0 = read req
     output reg [ADDR_WIDTH-1:0] mem_addr_o, // Data address to fetch
-    output reg [(8*CACHE_LINE_SIZE)-1:0] l2_data_o // Complete cache line being written downward (just data portion)
+    output wire [(8*CACHE_LINE_SIZE)-1:0] l2_data_o // Complete cache line being written downward to l2 (just data portion)
 );
 
 // ================ Derived Parameters ================
@@ -66,8 +68,8 @@ localparam [ADDR_WIDTH-1:0] TAG_MASK = ((1 << TAG_BITS) - 1) << (OFFSET_BITS + I
 localparam [2:0] STATE_I = 3'b001; // Invalid
 localparam [2:0] STATE_S = 3'b010; // Shared
 localparam [2:0] STATE_M = 3'b100; // Modified
-localparam [2:0] STATE_MX = 3'b011; // M, fetch/invalidate in flight
 localparam [2:0] STATE_WAITING_L2 = 3'b101;
+localparam [2:0] S_WAITING_OWNER = 3'b110;
 
 // ================ Directory Entry Layout ================
 // [tag (20 bits) | state (3 bits) | Π presence vector (CORE_ID_BITS bits)]
@@ -114,9 +116,10 @@ wire [NUM_CORES-1:0] cur_pi = cur_entry[NUM_CORES-1:0]; // curren directory entr
 // Directory index: bits above the cache-line offset
 wire [INDEX_BITS-1:0] dir_idx = req_addr[OFFSET_BITS + INDEX_BITS - 1 : OFFSET_BITS];
 
-
-
-
+// data to write down to l2
+// note that writeback to l2 only happens when a miss happens and an owner writes data back
+assign l2_data_o = l1_data_i;
+assign l1_dg_addr_o = req_addr;
 
 
 
@@ -175,19 +178,15 @@ always @(posedge clk_i or posedge reset_i) begin
                 if(cur_entry[CORE_ID_BITS-1:0] == 0) begin
                     // No owner, fetch data from L2
                     l2_req_o <= 1;
-                    l2_we_o <= 0;
+                    l2_we_o <= 0; // read request
                     mem_addr_o <= req_addr;
                     state <= STATE_WAITING_L2;
                 end else begin
-                    // NOTE CONCURRENCY ISSUE (no more?)
+                    // NOTE CONCURRENCY ISSUE
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
-                    l1_inv_core_o <= cur_entry[CORE_ID_BITS-1:0];
-                    l1_inv_signal_o <= 1;
-                    
-                    // Write the OWNER's line to L2
-                    l2_req_o <= 1;
-                    l2_we_o <= 1;
-                    l2_data_o <= l1_data_o;
+                    l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
+                    l1_dg_signal_o <= 2'b01; // downgrade to S
+                    state <= S_WAITING_OWNER;
                 end
             end
             S_SD_MISS: begin
@@ -197,13 +196,36 @@ always @(posedge clk_i or posedge reset_i) begin
             
             end
 
+            S_WAITING_OWNER: begin
+                // Block until owner has completed operation
+                if(l1_dg_ack_i) begin
+                    // Write the OWNER's line to L2
+                    l2_req_o <= 1;
+                    l2_we_o <= 1; // write request
+                    mem_addr_o <= req_addr;
+
+                    // Owner must forward line to requester (current core)
+                    l1_signal_o <= 1;
+                    l1_core_o <= req_core;
+                    l1_data_o <= l1_data_i; // routed from line owner, not l2
+
+                    // Update directory entry metadata
+                    directory[dir_idx][NUM_CORES-1:0] <= cur_entry[NUM_CORES-1:0] | req_core;
+                    directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+                    
+                    state <= S_IDLE; // completed coherent request
+                end else begin
+                    state <= S_WAITING_OWNER;
+                end
+            end
+
             STATE_WAITING_L2: begin
                 // Block until data from L2 is fetched
                 if(l2_signal_i) begin
                     // Pass to L1 if received signal
                     l1_signal_o <= 1;
                     l1_core_o <= req_core;
-                    l1_data_o <= mem_rdata_i;
+                    l1_data_o <= mem_rdata_i; // data passed form l2
                     state <= S_IDLE; // completed coherent request
                 end else begin
                     state <= STATE_WAITING_L2;
