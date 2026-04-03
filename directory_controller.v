@@ -7,14 +7,6 @@ module directory_controller #(
     parameter CACHE_ENTRIES_PER_CORE = 32,
     parameter CACHE_LINE_SIZE = 64, // 64 bytes per cache line
     parameter ADDR_WIDTH = 32 // 32-bit addresses
-
-    // Address parsing
-    parameter OFFSET_BITS = $clog2(CACHE_LINE_SIZE); // Byte-offset bits in cache line
-    parameter INDEX_BITS = $clog2(CACHE_ENTRIES_PER_CORE); // Index into each directory entry
-    parameter TAG_BITS = ADDR_WIDTH - OFFSET_BITS - INDEX_BITS;
-    // Cache line entry
-    parameter LINE_WIDTH = 8 * CACHE_LINE_SIZE; // Number of data bits in a cache line
-    parameter CACHE_ENTRY_BITS = TAG_BITS + 3 + LINE_WIDTH;
 )(
     input wire clk_i,
     input wire reset_i,
@@ -28,7 +20,7 @@ module directory_controller #(
     input wire [NUM_CORES-1:0] core_i, // The core doing the request (one hot)
     input wire [2:0] coh_req_i,
     input wire [ADDR_WIDTH-1:0] addr_i, // address from coherence request
-    input wire [(8*CACHE_LINE_SIZE)-1:0] l1_data_i // Complete cache line being written downward to l2 (just data portion)
+    input wire [(8*CACHE_LINE_SIZE)-1:0] l1_data_i, // Complete cache line being written downward to l2 (just data portion)
     input wire l1_dg_ack_i, // acknowledge that the downgrade has been completed
 
     // Input from L2
@@ -63,6 +55,8 @@ localparam CACHE_ENTRY_BITS = TAG_BITS + 3 + LINE_WIDTH;
 localparam [ADDR_WIDTH-1:0] OFFSET_MASK = (1 << OFFSET_BITS) - 1;
 localparam [ADDR_WIDTH-1:0] INDEX_MASK = ((1 << INDEX_BITS) - 1) << OFFSET_BITS;
 localparam [ADDR_WIDTH-1:0] TAG_MASK = ((1 << TAG_BITS) - 1) << (OFFSET_BITS + INDEX_BITS);
+
+localparam NUM_ENTRIES = NUM_CORES * CACHE_ENTRIES_PER_CORE;
 
 // ================ One-hot State encoding ================
 localparam [2:0] STATE_I = 3'b001; // Invalid
@@ -99,7 +93,7 @@ localparam TRANSACTION_MODE = 1'b1;
 
 
 // ================ Internal Storage and Wiring ================
-reg [ENTRY_WIDTH-1:0] directory [0:NUM_ENTRIES-1];
+reg [ENTRY_WIDTH-1:0] directory [NUM_ENTRIES-1:0];
 reg [3:0] state;
 // reg [NUM_CORES-1:0] in_transaction;  // 1 bit per core
 

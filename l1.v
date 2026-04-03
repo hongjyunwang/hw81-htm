@@ -5,7 +5,7 @@
 // TODO: Actually need an ACK signal to notify the completion of a coherence request (governed by completion of some operation in L1, so will prolly be implemented here)
 
 module l1 #(
-    parameter CORE_ID,
+    parameter CORE_ID = 0,
     parameter NUM_CORES = 2,
     parameter CORE_ID_BITS = 1,
 

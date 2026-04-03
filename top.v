@@ -29,7 +29,7 @@ module top #(
     output wire l2_we_o,
     output wire [ADDR_WIDTH-1:0] l2_addr_o,
     output wire [(8*CACHE_LINE_SIZE)-1:0] l2_wdata_o
-)
+);
 
 // ================ Internal Wires ================
 // Naming for some of the wires: sender_receiver_wireName
@@ -127,10 +127,5 @@ directory_controller dc(
     .mem_addr_o(l2_addr_o), // Data address to fetch
     .l2_data_o(l2_wdata_o) // Complete cache line being written downward to l2 (just data portion)
 );
-
-
-
-
-
 
 endmodule
