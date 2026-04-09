@@ -62,8 +62,7 @@ localparam NUM_ENTRIES = NUM_CORES * CACHE_ENTRIES_PER_CORE;
 localparam [2:0] STATE_I = 3'b001; // Invalid
 localparam [2:0] STATE_S = 3'b010; // Shared
 localparam [2:0] STATE_M = 3'b100; // Modified
-localparam [2:0] STATE_WAITING_L2 = 3'b101;
-localparam [2:0] S_WAITING_OWNER = 3'b110;
+
 
 // ================ Directory Entry Layout ================
 // [tag (20 bits) | state (3 bits) | Π presence vector (CORE_ID_BITS bits)]
@@ -85,7 +84,9 @@ localparam [3:0]
     S_LD_HIT = 4'd2,
     S_LD_MISS = 4'd3,
     S_SD_MISS = 4'd4,
-    S_SD_HIT = 4'd5;
+    S_SD_HIT = 4'd5,
+    S_WAITING_OWNER  = 4'd6,
+    S_WAITING_L2 = 4'd7;
 
 localparam NORMAL_MODE = 1'b0;
 localparam TRANSACTION_MODE = 1'b1;
@@ -115,25 +116,37 @@ wire [INDEX_BITS-1:0] dir_idx = req_addr[OFFSET_BITS + INDEX_BITS - 1 : OFFSET_B
 assign l2_data_o = l1_data_i;
 assign l1_dg_addr_o = req_addr;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+reg [3:0] prev_state;
+integer j;
 always @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
-        // reset all registers and outputs
-
+        state <= S_IDLE;
+        l2_req_o <= 0;
+        l2_we_o <= 0;
+        mem_addr_o <= 0;
+        l1_signal_o <= 0;
+        l1_core_o <= 0;
+        l1_data_o <= 0;
+        l1_dg_signal_o <= 2'b00;
+        l1_dg_core_o <= 0;
+        req_core <= 0;
+        req_type <= 0;
+        req_addr <= 0;
+        cur_entry <= 0;
+        fetched_line <= 0;
+        for (j = 0; j < NUM_ENTRIES; j = j + 1)
+            directory[j] <= 0;
     end else begin
         // default output pulses low every cycle
+        l2_req_o <= 0;
+        l2_we_o <= 0;
+        l1_signal_o <= 0;
+        l1_dg_signal_o <= 2'b00;
+
+        if (state != prev_state) begin
+            $display("[DC tick] state transition: %0d -> %0d", prev_state, state);
+            prev_state <= state;
+        end
 
         // transaction bit-vector tracking (tx_begin_i / tx_end_i)
 
@@ -145,8 +158,13 @@ always @(posedge clk_i or posedge reset_i) begin
                     req_core <= core_i;
                     req_type <= coh_req_i;
                     req_addr <= addr_i;
-                    cur_entry <= directory[dir_idx];
+                    cur_entry <= directory[addr_i[OFFSET_BITS + INDEX_BITS - 1 : OFFSET_BITS]]; // reads directly from addr_i
                     state <= S_PROCESS;
+
+                    $strobe("[DC S_IDLE] latched: req_core=%b req_type=%b req_addr=0x%h cur_pi=%b cur_state=%b",
+                        req_core, req_type, req_addr,
+                        cur_entry[NUM_CORES-1:0],
+                        cur_entry[STATE_HI:STATE_LO]);
                 end
             end
             S_PROCESS: begin
@@ -161,6 +179,15 @@ always @(posedge clk_i or posedge reset_i) begin
                     REQ_SD_MISS:
                         state <= S_SD_MISS;
                 endcase
+
+                $display("[DC S_PROCESS] req_type=%b -> next_state=%s  cur_pi=%b cur_state=%b",
+                    req_type,
+                    (req_type == REQ_LD_HIT)  ? "S_LD_HIT"  :
+                    (req_type == REQ_LD_MISS) ? "S_LD_MISS" :
+                    (req_type == REQ_SD_HIT)  ? "S_SD_HIT"  :
+                    (req_type == REQ_SD_MISS) ? "S_SD_MISS" : "UNKNOWN",
+                    cur_entry[NUM_CORES-1:0],
+                    cur_entry[STATE_HI:STATE_LO]);
             end
 
             S_LD_HIT:  begin
@@ -174,7 +201,8 @@ always @(posedge clk_i or posedge reset_i) begin
                     l2_req_o <= 1;
                     l2_we_o <= 0; // read request
                     mem_addr_o <= req_addr;
-                    state <= STATE_WAITING_L2;
+                    state <= S_WAITING_L2;
+                    $display("[DC S_LD_MISS] transitioning to S_WAITING_L2");
                 end else begin
                     // NOTE CONCURRENCY ISSUE
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
@@ -182,6 +210,11 @@ always @(posedge clk_i or posedge reset_i) begin
                     l1_dg_signal_o <= 2'b01; // downgrade to S
                     state <= S_WAITING_OWNER;
                 end
+
+                $display("[DC S_LD_MISS] cur_pi=%b cur_state=%b -> %s",
+                    cur_entry[NUM_CORES-1:0],
+                    cur_entry[STATE_HI:STATE_LO],
+                    (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
             end
             S_SD_MISS: begin
             
@@ -191,6 +224,8 @@ always @(posedge clk_i or posedge reset_i) begin
             end
 
             S_WAITING_OWNER: begin
+                l1_dg_signal_o <= 2'b01; // held high each cycle until ack
+                l1_dg_core_o <= cur_pi[CORE_ID_BITS-1:0];
                 // Block until owner has completed operation
                 if(l1_dg_ack_i) begin
                     // Write the OWNER's line to L2
@@ -213,16 +248,26 @@ always @(posedge clk_i or posedge reset_i) begin
                 end
             end
 
-            STATE_WAITING_L2: begin
+            S_WAITING_L2: begin
                 // Block until data from L2 is fetched
+                $display("[DC S_WAITING_L2] tick, l2_signal_i=%b", l2_signal_i);
+
                 if(l2_signal_i) begin
-                    // Pass to L1 if received signal
+                    // Pass fetched line to requesting L1
                     l1_signal_o <= 1;
                     l1_core_o <= req_core;
-                    l1_data_o <= mem_rdata_i; // data passed form l2
-                    state <= S_IDLE; // completed coherent request
+                    l1_data_o <= mem_rdata_i;
+ 
+                    // Update directory: mark requester as sharer, set state S
+                    directory[dir_idx][NUM_CORES-1:0] <= req_core;
+                    directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+ 
+                    state <= S_IDLE;
+
+                    $display("[S_WAITING_L2] Acquired data from L2");
                 end else begin
-                    state <= STATE_WAITING_L2;
+                    state <= S_WAITING_L2;
+                    $display("[S_WAITING_L2] Still Waiting");
                 end
             end
 

@@ -1,7 +1,7 @@
 // On the way back up: l1_ready_o, l1_data_o, ACK_o, invalidate_o from the directory need to be routed to the correct L1 instance based on l1_core_o
 
 module top #(
-    parameter NUM_CORES = 2,
+    parameter NUM_CORES = 1,
     parameter CORE_ID_BITS = 1,
 
     parameter CACHE_ENTRIES_PER_CORE = 32, // 32 cache entries per core
@@ -40,13 +40,17 @@ wire [1:0] dg_signal;
 wire [CORE_ID_BITS-1:0] dg_core;
 wire [ADDR_WIDTH-1:0] dg_addr;
 
-wire l1_dc_dignal;
+wire l1_dc_signal;
 wire [NUM_CORES-1:0] l1_dc_core; // The core doing the request (one hot)
 wire [ADDR_WIDTH-1:0] l1_dc_addr; // address sent down to directory controller
 wire [2:0] l1_dc_coh_req;
 wire [(8*CACHE_LINE_SIZE)-1:0] l1_dc_l2_data; // data to pass to L2 for writeback
 wire l1_dg_ack; // acknowledge that the downgrade has been completed
 
+// Per-core CPU output wires (muxed below)
+wire cpu_ready_per_core [NUM_CORES-1:0];
+wire cpu_resp_valid_per_core[NUM_CORES-1:0];
+wire [(8*CACHE_LINE_SIZE)-1:0] cpu_data_per_core [NUM_CORES-1:0];
 
 // ================ Output Mux (core -> CPU) ================
 // Route the responding core's outputs back to the CPU
@@ -56,53 +60,48 @@ assign cpu_data = cpu_data_per_core[cpu_core];
 
 
 // ================ L1 Instances ================
-genvar i;
-generate
-    for (i = 0; i < NUM_CORES; i = i + 1) begin : l1_gen
-        l1 #(.CORE_ID(i)) l1_inst (
-            .clk_i(clk),
-            .reset_i(rst),
+l1 #(.CORE_ID(0), .NUM_CORES(NUM_CORES), .CORE_ID_BITS(CORE_ID_BITS)) l1_inst (
+    .clk_i(clk),
+    .reset_i(rst),
 
-            // From CPU (gated by core select)
-            .cpu_signal_i(cpu_req_valid && (cpu_core == i)),
-            .addr_i(cpu_addr),
-            .req_i(cpu_req),
-            .core_i(cpu_core),
+    // From CPU (gated by core select)
+    .cpu_signal_i(cpu_req_valid),
+    .addr_i(cpu_addr),
+    .req_i(cpu_req),
+    .core_i(cpu_core),
 
-            // From DC (data return; each core checks dc_l1_core)
-            .dc_signal_i(dc_l1_signal),
-            .l1_core_i(dc_l1_core),
-            .l1_data_i(dc_l1_data),
+    // From DC (data return; each core checks dc_l1_core)
+    .dc_signal_i(dc_l1_data_signal),
+    .l1_core_i(dc_l1_data_core),
+    .l1_data_i(dc_l1_data),
 
-            // From DC (downgrade/invalidate)
-            .dg_signal_i(dg_signal),
-            .l1_dg_core_i(dg_core),
-            .l1_dg_addr_i(dg_addr),
+    // From DC (downgrade/invalidate)
+    .dg_signal_i(dg_signal),
+    .l1_dg_core_i(dg_core),
+    .l1_dg_addr_i(dg_addr),
 
-            // To CPU
-            .cpu_ready_o(cpu_ready_per_core[i]),
-            .cpu_signal_o(cpu_resp_valid_per_core[i]),
-            .cpu_data_o(cpu_data_per_core[i]),
+    // To CPU
+    .cpu_ready_o(cpu_ready_per_core[0]),
+    .cpu_signal_o(cpu_resp_valid_per_core[0]),
+    .cpu_data_o(cpu_data_per_core[0]),
 
-            // To DC (arbitrated, only 1 core requests at a time for now)
-            .dc_signal_o(l1_dc_signal),
-            .core_o(l1_dc_core),
-            .addr_o(l1_dc_addr),
-            .coh_req_o(l1_dc_coh_req),
-            .l2_data_o(l1_dc_wdata),
-            .l1_dg_ack_o(l1_dg_ack)
-        );
-    end
-endgenerate
+    // To DC (arbitrated, only 1 core requests at a time for now)
+    .dc_signal_o(l1_dc_signal),
+    .core_o(l1_dc_core),
+    .addr_o(l1_dc_addr),
+    .coh_req_o(l1_dc_coh_req),
+    .l2_data_o(l1_dc_l2_data),
+    .l1_dg_ack_o(l1_dg_ack)
+);
 
 
 
-directory_controller dc(
+directory_controller #(.NUM_CORES(NUM_CORES), .CORE_ID_BITS(CORE_ID_BITS)) dc(
     .clk_i(clk),
     .reset_i(rst),
 
     // Input from L1 cache
-    .l1_signal_i(l1_dc_dignal), // Handshake: L1 is presenting a real coherent request
+    .l1_signal_i(l1_dc_signal), // Handshake: L1 is presenting a real coherent request
     .core_i(l1_dc_core), // The core doing the request (one hot)
     .addr_i(l1_dc_addr), // address from coherence request
     .coh_req_i(l1_dc_coh_req),

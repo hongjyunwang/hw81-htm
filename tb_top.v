@@ -6,7 +6,7 @@
 module tb_top;
 
 // ================ Parameters ================
-localparam NUM_CORES = 2;
+localparam NUM_CORES = 1;
 localparam CORE_ID_BITS = 1;
 localparam CACHE_LINE_SIZE = 64;
 localparam ADDR_WIDTH = 32;
@@ -45,6 +45,7 @@ top #(
 ) dut (
     .clk(clk),
     .rst(rst),
+    
     .cpu_req_valid(cpu_req_valid),
     .cpu_addr(cpu_addr),
     .cpu_req(cpu_req),
@@ -52,6 +53,7 @@ top #(
     .cpu_ready(cpu_ready),
     .cpu_resp_valid(cpu_resp_valid),
     .cpu_data(cpu_data),
+
     .l2_signal_i(l2_signal_i),
     .l2_rdata_i(l2_rdata_i),
     .l2_req_o(l2_req_o),
@@ -67,10 +69,10 @@ always #(CLK_PERIOD/2) clk = ~clk;
 
 // ================ Waveform Dump ================
 // Creates a .vcd file you can open in GTKWave
-initial begin
-    $dumpfile("tb_top.vcd");
-    $dumpvars(0, tb_top); // 0 = dump all levels under tb_top
-end
+// initial begin
+//     $dumpfile("tb_top.vcd");
+//     $dumpvars(0, tb_top); // 0 = dump all levels under tb_top
+// end
 
 // ================ Helper Tasks ================
 // Tasks let you name common sequences so stimulus blocks stay readable
@@ -103,7 +105,7 @@ task cpu_load;
     input [CORE_ID_BITS-1:0] issuing_core;
     input [ADDR_WIDTH-1:0] address;
     begin
-        @(negedge clk);             // drive on negedge, DUT samples on posedge
+        @(negedge clk); // drive on negedge, DUT samples on posedge
         cpu_core = issuing_core;
         cpu_addr = address;
         cpu_req = 0; // 0 = load
@@ -128,7 +130,7 @@ task l2_respond;
         @(posedge clk);
         @(negedge clk);
         l2_signal_i = 0;
-        $display("[%0t] L2 responded with data", $time);
+        $display("[%0t] Test Bench: L2 responded with data", $time);
     end
 endtask
 
@@ -172,7 +174,7 @@ initial begin
         begin
             @(posedge l2_req_o); // wait until DC asks L2
             $display("[%0t] DC issued L2 read for addr=0x%08h", $time, l2_addr_o);
-            l2_respond(512'hCAFE_BABE, 5); // fake data, 5-cycle L2 latency
+            l2_respond(512'hCAFE_BABE, 10);
         end
     join
 
@@ -182,36 +184,21 @@ initial begin
     // ---------- Test 2: Load same line (should hit) ----------
     $display("\n=== TEST 2: Cache hit, core 0, same address ===");
     cpu_load(0, 32'hDEAD_0000);
+    wait_for_cpu_resp(20);
     // L2 should NOT be contacted — check l2_req_o stays low
     repeat (10) @(posedge clk);
     if (!l2_req_o)
         $display("[%0t] PASS: No L2 request on hit", $time);
     else
         $display("[%0t] FAIL: Unexpected L2 request on hit", $time);
-    wait_for_cpu_resp(20);
     wait_cycles(2);
 
-    // ---------- Test 3: Two cores, potential invalidation ----------
-    $display("\n=== TEST 3: Core 1 loads same line as Core 0 ===");
-    fork
-        cpu_load(1, 32'hDEAD_0000);
-        begin
-            @(posedge l2_req_o);
-            l2_respond(512'hCAFE_BABE, 3);
-        end
-    join
-    wait_for_cpu_resp(50);
-
-    // Done
-    wait_cycles(5);
-    $display("\n=== All tests complete ===");
-    $finish;
 end
 
 // ================ Optional Continuous Monitor ================
 // $monitor fires automatically whenever a listed signal changes
-initial begin
-    $monitor("[%0t] l2_req=%b l2_we=%b l2_addr=0x%08h cpu_resp=%b", $time, l2_req_o, l2_we_o, l2_addr_o, cpu_resp_valid);
-end
+// initial begin
+//     $monitor("[%0t] l2_req=%b l2_we=%b l2_addr=0x%08h cpu_resp=%b", $time, l2_req_o, l2_we_o, l2_addr_o, cpu_resp_valid);
+// end
 
 endmodule

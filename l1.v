@@ -2,7 +2,16 @@
  * Each core will have its own instantiation of the l1 module
  */
 
-// TODO: Actually need an ACK signal to notify the completion of a coherence request (governed by completion of some operation in L1, so will prolly be implemented here)
+// TODO: 
+// See if I do the proper data fetch for load hit
+// The store or hit needs to be redone after a miss to secure a hit this next time
+// Make sure I handle the basic data passing on a hit
+
+// Concurrency issues:
+// - hardware conflict between directory and cpu accesses
+// - different cores' access to same data is also a conflict to be dealt in normal mode (avoid queues)
+// - BANE, handle last: the downgrade/eviction issue (make directory controller wait)
+
 
 module l1 #(
     parameter CORE_ID = 0,
@@ -89,6 +98,7 @@ reg l1_state;
 reg [INDEX_BITS-1:0] latched_index;
 reg [TAG_BITS-1:0] latched_tags;
 reg latched_req;
+reg [2:0] latched_coh_req;
 
 // ================ Wires for Address Parsing ================
 wire [TAG_BITS-1:0] tags = (addr_i & TAG_MASK) >> (OFFSET_BITS + INDEX_BITS);
@@ -127,23 +137,30 @@ always @(*) begin
             default:
                 coh_req_o = REQ_LD_HIT;
         endcase
+        $display("[L1 comb] cpu_signal_i=%b hit=%b req=%b -> coh_req_o=%b", cpu_signal_i, hit, req_i, coh_req_o);
+    end
+    else if (l1_state == L1_WAIT) begin
+        coh_req_o = latched_coh_req;
     end
 end
 
-
+integer j;
 wire [INDEX_BITS-1:0] dg_index = (l1_dg_addr_i & INDEX_MASK) >> OFFSET_BITS;
 assign l1_dg_ack_o = dg_signal_i && ((core_i & l1_dg_core_i) != 0); // driven on 
 assign l2_data_o = (dg_signal_i && (core_i & l1_dg_core_i != 0)) ? entries[dg_index][LINE_WIDTH-1:0] : 0; // driven on downgrade signal
 // ================ Sequential Block ================
 always @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
-        l1_state <= L1_IDLE;
+        l1_state     <= L1_IDLE;
         dc_signal_o  <= 0;
         cpu_signal_o <= 0;
-        cpu_data_o <= 0;
-        latched_tags <= 0;
+        cpu_data_o   <= 0;
+        latched_tags  <= 0;
         latched_index <= 0;
-        latched_req <= 0;
+        latched_req   <= 0;
+        latched_coh_req <= 0;
+        for (j = 0; j < CACHE_ENTRIES_PER_CORE; j = j + 1)
+            entries[j] <= {{TAG_BITS{1'b0}}, STATE_I, {LINE_WIDTH{1'b0}}}; // initialize entries
     end else begin
         // Default all output pulses low each cycle
         dc_signal_o <= 0;
@@ -162,6 +179,7 @@ always @(posedge clk_i or posedge reset_i) begin
                         latched_index <= index;
                         latched_tags <= tags;
                         latched_req <= req_i;
+                        latched_coh_req <= coh_req_o;
                         
                         // Signal directory to take action
                         dc_signal_o <= 1;
@@ -169,6 +187,8 @@ always @(posedge clk_i or posedge reset_i) begin
                         // Set next state
                         l1_state <= L1_WAIT;
                     end
+                    $strobe("[L1 seq - L1_IDLE] latched_index=%b latched_tags=%b latched_req=%b dc_signal_o=%b",
+                                latched_index, latched_tags, latched_req, dc_signal_o);
                 end
             end
             L1_WAIT: begin
@@ -185,7 +205,7 @@ always @(posedge clk_i or posedge reset_i) begin
 
                     // Return data to CPU
                     cpu_signal_o <= 1;
-                    cpu_data_o <= l1_data_i;
+                    cpu_data_o <= l1_data_i; // TODO: Don't pass entire block to CPU, just the requested byte
                     // Ackowledge complete state downgrade
                     l1_state <= L1_IDLE;
                 end
