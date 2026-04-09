@@ -204,7 +204,6 @@ always @(posedge clk_i or posedge reset_i) begin
                     state <= S_WAITING_L2;
                     $display("[DC S_LD_MISS] transitioning to S_WAITING_L2");
                 end else begin
-                    // NOTE CONCURRENCY ISSUE
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
                     l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
                     l1_dg_signal_o <= 2'b01; // downgrade to S
@@ -217,10 +216,28 @@ always @(posedge clk_i or posedge reset_i) begin
                     (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
             end
             S_SD_MISS: begin
-            
+                // Check whether the requested block is in the M state in another cache (the owner)
+                if(cur_entry[CORE_ID_BITS-1:0] == 0) begin
+                    // No owner, fetch data from L2
+                    l2_req_o <= 1;
+                    l2_we_o <= 1; // write request
+                    mem_addr_o <= req_addr;
+                    state <= S_WAITING_L2;
+                    $display("[DC S_SD_MISS] transitioning to S_WAITING_L2");
+                end else begin
+                    // There is an owner, owner downgrades its L1 state to S (send out invalidate)
+                    l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
+                    l1_dg_signal_o <= 2'b10; // downgrade to I
+                    state <= S_WAITING_OWNER;
+                end
+
+                $display("[DC S_SD_MISS] cur_pi=%b cur_state=%b -> %s",
+                    cur_entry[NUM_CORES-1:0],
+                    cur_entry[STATE_HI:STATE_LO],
+                    (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
             end
             S_SD_HIT: begin
-            
+                
             end
 
             S_WAITING_OWNER: begin
@@ -239,8 +256,8 @@ always @(posedge clk_i or posedge reset_i) begin
                     l1_data_o <= l1_data_i; // routed from line owner, not l2
 
                     // Update directory entry metadata
-                    directory[dir_idx][NUM_CORES-1:0] <= cur_entry[NUM_CORES-1:0] | req_core;
-                    directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+                    directory[dir_idx][NUM_CORES-1:0] <= (req_type == REQ_SD_MISS) ? req_core : (cur_pi | req_core);
+                    directory[dir_idx][STATE_HI:STATE_LO] <= (req_type == REQ_SD_MISS) ? STATE_M  : STATE_S;
                     
                     state <= S_IDLE; // completed coherent request
                 end else begin
@@ -258,9 +275,9 @@ always @(posedge clk_i or posedge reset_i) begin
                     l1_core_o <= req_core;
                     l1_data_o <= mem_rdata_i;
  
-                    // Update directory: mark requester as sharer, set state S
+                    // Update directory
                     directory[dir_idx][NUM_CORES-1:0] <= req_core;
-                    directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+                    directory[dir_idx][STATE_HI:STATE_LO] <= (req_type == REQ_SD_MISS) ? STATE_M : STATE_S;
  
                     state <= S_IDLE;
 

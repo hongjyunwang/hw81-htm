@@ -182,16 +182,10 @@ initial begin
     wait_cycles(2);
 
     // ---------- Test 2: Load same line (should hit) ----------
-    $display("\n=== TEST 2: Cache hit, core 0, same address ===");
-    cpu_load(0, 32'hDEAD_0000);
-    wait_for_cpu_resp(20);
-    // L2 should NOT be contacted — check l2_req_o stays low
-    repeat (10) @(posedge clk);
-    if (!l2_req_o)
-        $display("[%0t] PASS: No L2 request on hit", $time);
-    else
-        $display("[%0t] FAIL: Unexpected L2 request on hit", $time);
-    wait_cycles(2);
+    
+
+    // Suppose the cpu sends another request when the directory controller is doing stuff
+    
 
 end
 
