@@ -196,8 +196,8 @@ always @(posedge clk_i or posedge reset_i) begin
                 // dc_signal_i should only be sent in L1_WAIT state
                 if ((l1_core_i == core_i)&& dc_signal_i) begin
 
-                    // Write in fetched data
-                    entries[latched_index][LINE_WIDTH-1:0] <= l1_data_i;
+                    // Write in fetched data or stored data if store hit
+                    entries[latched_index][LINE_WIDTH-1:0] <= <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i;
 
                     // Fill the cache entry using latched fields
                     entries[latched_index][CACHE_ENTRY_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS] <= latched_tags;
@@ -205,7 +205,7 @@ always @(posedge clk_i or posedge reset_i) begin
 
                     // Return data to CPU
                     cpu_signal_o <= 1;
-                    cpu_data_o <= l1_data_i; // TODO: Don't pass entire block to CPU, just the requested byte
+                    cpu_data_o <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i; // Pass in fetched data or stored data if store hit
                     // Ackowledge complete state downgrade
                     l1_state <= L1_IDLE;
                 end

@@ -236,32 +236,64 @@ always @(posedge clk_i or posedge reset_i) begin
                     cur_entry[STATE_HI:STATE_LO],
                     (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
             end
+
             S_SD_HIT: begin
-                
+                // Compute which cores need invalidating: all sharers except the requester
+                // For NUM_CORES=2 there is at most one other sharer
+                if ((cur_pi & ~req_core) == 0) begin
+                    // No other sharers — requester is already the only one, just upgrade
+                    l1_signal_o <= 1;
+                    l1_core_o <= req_core;
+                    directory[dir_idx][NUM_CORES-1:0] <= req_core;
+                    directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
+                    state <= S_IDLE;
+                end else begin
+                    // Invalidate all other sharers
+                    l1_dg_core_o <= cur_pi & ~req_core; // target cores (everyone except requester)
+                    l1_dg_signal_o <= 2'b11; // SD_HIT invalidate
+                    state <= S_WAITING_OWNER;
+                end
             end
 
             S_WAITING_OWNER: begin
-                l1_dg_signal_o <= 2'b01; // held high each cycle until ack
-                l1_dg_core_o <= cur_pi[CORE_ID_BITS-1:0];
-                // Block until owner has completed operation
-                if(l1_dg_ack_i) begin
-                    // Write the OWNER's line to L2
-                    l2_req_o <= 1;
-                    l2_we_o <= 1; // write request
-                    mem_addr_o <= req_addr;
+                l1_dg_signal_o <= (req_type == REQ_SD_MISS) ? 2'b10 : (req_type == REQ_SD_HIT)  ? 2'b11 : 2'b01; // determine signal type
+                l1_dg_core_o   <= cur_pi & ~req_core;
+                
+                if (l1_dg_ack_i) begin
+                    l1_dg_signal_o <= 2'b00;
 
-                    // Owner must forward line to requester (current core)
+                    // Always ack the requester
                     l1_signal_o <= 1;
                     l1_core_o <= req_core;
-                    l1_data_o <= l1_data_i; // routed from line owner, not l2
 
-                    // Update directory entry metadata
-                    directory[dir_idx][NUM_CORES-1:0] <= (req_type == REQ_SD_MISS) ? req_core : (cur_pi | req_core);
-                    directory[dir_idx][STATE_HI:STATE_LO] <= (req_type == REQ_SD_MISS) ? STATE_M  : STATE_S;
-                    
-                    state <= S_IDLE; // completed coherent request
-                end else begin
-                    state <= S_WAITING_OWNER;
+                    case (req_type)
+                        REQ_LD_MISS: begin
+                            // Owner forwards data, both become S
+                            l1_data_o <= l1_data_i;
+                            l2_req_o <= 1;
+                            l2_we_o <= 1;
+                            mem_addr_o <= req_addr;
+                            directory[dir_idx][NUM_CORES-1:0]    <= cur_pi | req_core;
+                            directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+                        end
+                        REQ_SD_MISS: begin
+                            // Owner evicted, requester becomes sole M owner
+                            l1_data_o <= l1_data_i;
+                            l2_req_o <= 1;
+                            l2_we_o <= 1;
+                            mem_addr_o <= req_addr;
+                            directory[dir_idx][NUM_CORES-1:0]    <= req_core;
+                            directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
+                        end
+                        REQ_SD_HIT: begin
+                            // No data forwarding needed — requester already has the data
+                            // Just upgrade directory and let requester know it can proceed
+                            directory[dir_idx][NUM_CORES-1:0] <= req_core;
+                            directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
+                        end
+                    endcase
+
+                    state <= S_IDLE;
                 end
             end
 
