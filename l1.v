@@ -34,9 +34,9 @@ module l1 #(
     // Input from the directory controller
     input dc_signal_i, // Handshake: signaled when data is sent in from the directory controller
     input [(8*CACHE_LINE_SIZE)-1:0] l1_data_i, // Fetched cache line
-    input [CORE_ID_BITS-1:0] l1_core_i, // Target core for data
+    input [NUM_CORES-1:0] l1_core_i, // Target core for data
     input [1:0] dg_signal_i, // Invalidate signal
-    input [CORE_ID_BITS-1:0] l1_dg_core_i, // Target core for invalidate signal
+    input [NUM_CORES-1:0] l1_dg_core_i, // Target core for invalidate signal
     input [ADDR_WIDTH-1:0] l1_dg_addr_i, // Target address to be downgraded
 
     // Output to the processor
@@ -49,6 +49,10 @@ module l1 #(
     output wire [NUM_CORES-1:0] core_o, // The core doing the request (one hot)
     output wire [ADDR_WIDTH-1:0] addr_o, // address sent down to directory controller
     output reg [2:0] coh_req_o,
+    // REQ_LD_HIT = 3'b000;
+    // REQ_LD_MISS = 3'b001;
+    // REQ_SD_HIT = 3'b010;
+    // REQ_SD_MISS = 3'b100;
     output wire [(8*CACHE_LINE_SIZE)-1:0] l2_data_o, // data to pass to L2 for writeback
     output wire l1_dg_ack_o // acknowledge that the downgrade has been completed
 ); 
@@ -107,7 +111,7 @@ wire [OFFSET_BITS-1:0] offset = addr_i & OFFSET_MASK;
 
 // ================ Wiring to Directory Controller ================
 assign addr_o = addr_i;
-assign core_o = core_i;
+assign core_o = 1 << core_i;
 
 // ================ Hit Detection ================
 wire [2:0] cached_state = entries[index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3];
@@ -117,7 +121,6 @@ wire hit = (entries[index][CACHE_ENTRY_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS] == ta
 
 // CPU can issue a new request only when IDLE
 assign cpu_ready_o = (l1_state == L1_IDLE);
-
 
 
 
@@ -146,8 +149,8 @@ end
 
 integer j;
 wire [INDEX_BITS-1:0] dg_index = (l1_dg_addr_i & INDEX_MASK) >> OFFSET_BITS;
-assign l1_dg_ack_o = dg_signal_i && ((core_i & l1_dg_core_i) != 0); // driven on 
-assign l2_data_o = (dg_signal_i && (core_i & l1_dg_core_i != 0)) ? entries[dg_index][LINE_WIDTH-1:0] : 0; // driven on downgrade signal
+assign l1_dg_ack_o = dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0); // driven on 
+assign l2_data_o = (dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0)) ? entries[dg_index][LINE_WIDTH-1:0] : 0; // driven on downgrade signal
 // ================ Sequential Block ================
 always @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
@@ -176,6 +179,7 @@ always @(posedge clk_i or posedge reset_i) begin
                         cpu_data_o <= entries[index][LINE_WIDTH-1:0];
                     end else begin
                         // Miss: latch request fields and forward to directory
+                        // Remember the cache line being served
                         latched_index <= index;
                         latched_tags <= tags;
                         latched_req <= req_i;
@@ -194,10 +198,10 @@ always @(posedge clk_i or posedge reset_i) begin
             L1_WAIT: begin
                 // Block all new CPU requests until the miss is resolved
                 // dc_signal_i should only be sent in L1_WAIT state
-                if ((l1_core_i == core_i)&& dc_signal_i) begin
+                if (((l1_core_i & (1 << core_i)) != 0) && dc_signal_i) begin
 
                     // Write in fetched data or stored data if store hit
-                    entries[latched_index][LINE_WIDTH-1:0] <= <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i;
+                    entries[latched_index][LINE_WIDTH-1:0] <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i;
 
                     // Fill the cache entry using latched fields
                     entries[latched_index][CACHE_ENTRY_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS] <= latched_tags;
@@ -214,7 +218,7 @@ always @(posedge clk_i or posedge reset_i) begin
 
         // Downgrade and writeback operations
         // Confirm that the invalidate signal is sent and core_i is in l1_dg_core_i
-        if (dg_signal_i && ((core_i & l1_dg_core_i) != 0)) begin
+        if (dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0)) begin
             if(dg_signal_i == 2'b01) begin // LD_MISS
                 // downgrade to S
                 entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_S;

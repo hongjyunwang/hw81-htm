@@ -6,7 +6,7 @@
 module tb_top;
 
 // ================ Parameters ================
-localparam NUM_CORES = 1;
+localparam NUM_CORES = 2;
 localparam CORE_ID_BITS = 1;
 localparam CACHE_LINE_SIZE = 64;
 localparam ADDR_WIDTH = 32;
@@ -117,6 +117,23 @@ task cpu_load;
     end
 endtask
 
+// Issue a CPU store request from a specific core
+task cpu_store;
+    input [CORE_ID_BITS-1:0] issuing_core;
+    input [ADDR_WIDTH-1:0] address;
+    begin
+        @(negedge clk);
+        cpu_core = issuing_core;
+        cpu_addr = address;
+        cpu_req = 1; // 1 = store
+        cpu_req_valid = 1;
+        $display("[%0t] STORE core=%0d addr=0x%08h", $time, issuing_core, address);
+        @(posedge clk);
+        @(negedge clk);
+        cpu_req_valid = 0;
+    end
+endtask
+
 // Simulate L2 returning a cache line after the DC requests it
 // Call this after you see l2_req_o go high
 task l2_respond;
@@ -158,10 +175,10 @@ endtask
 
 // ================ Test Cases ================
 initial begin
-    // ---------- Test 1: Simple load, cold miss ----------
     apply_reset;
     wait_cycles(2);
 
+    // ---------- Test 1: Simple load, cold miss ----------
     $display("\n=== TEST 1: Cold miss load, core 0 ===");
     fork
         // Thread A: issue the CPU request
@@ -181,13 +198,81 @@ initial begin
     wait_for_cpu_resp(50);
     wait_cycles(2);
 
+
     // ---------- Test 2: Load same line (should hit) ----------
+    $display("\n=== TEST 2: Load same line (should hit) ===");
+    cpu_load(0, 32'hDEAD_0000);
+    wait_for_cpu_resp(50);
+    wait_cycles(2);
+
+
+    // ---------- Test 3: Store miss (cold miss, new address) ----------
+    $display("\n=== TEST 3: Store miss, core 0 ===");
+    fork
+        begin
+            cpu_store(0, 32'hBEEF_0000); // store for core 0, address 32'hBEEF_0000
+        end
+        begin
+            @(posedge l2_req_o);
+            $display("[%0t] DC issued L2 read for addr=0x%08h", $time, l2_addr_o);
+            l2_respond(512'hDEAD_BEEF, 10);
+        end
+    join
+
+    wait_for_cpu_resp(50);
+    wait_cycles(2);
+
+    // ---------- Test 4: Store same line (should hit, line is in M) ----------
+    $display("\n=== TEST 4: Store same line (should hit) ===");
+    cpu_store(0, 32'hBEEF_0000);
+    wait_for_cpu_resp(10);
+    wait_cycles(2);
+
+    // // ---------- Test A: Load miss, no owner ----------
+    // // Fresh address, DC goes straight to L2
+    // $display("\n=== TEST 5: Load miss, no owner ===");
+    // fork
+    //     begin
+    //         cpu_load(0, 32'hAAAA_0000);
+    //     end
+    //     begin
+    //         @(posedge l2_req_o);
+    //         $display("[%0t] No-owner path: DC fetching from L2", $time);
+    //         l2_respond(512'hAAAA_AAAA, 10);
+    //     end
+    // join
+    // wait_for_cpu_resp(50);
+    // wait_cycles(2);
+
+    // // ---------- Test B: Load miss, with owner ----------
+    // // Give core 1 an M-state line on 0xCAFE_0000 (core 1 is an owner)
+    // // Done by making it store to the line 
+    // $display("\n=== TEST 6 setup: Core 1 acquires M-state line ===");
+    // fork
+    //     begin
+    //         cpu_store(1, 32'hCAFE_0000);
+    //     end
+    //     begin
+    //         @(posedge l2_req_o);
+    //         $display("[%0t] Core 1 store miss: DC fetching from L2", $time);
+    //         l2_respond(512'hCAFE_CAFE, 10);
+    //     end        
+    // join
+    // wait_for_cpu_resp(50);
+    // wait_cycles(4);
+
+    // // Step 2: core 0 loads the same line — core 1 is the M-state owner
+    // // DC should: downgrade core 1 (M→S), core 1 writes back and forwards
+    // // data to core 0. No l2_respond needed — data comes from core 1, not L2.
+    // // However, core 1's writeback may pulse l2_we_o=1 (a write, no response needed).
+    // $display("\n=== TEST 6: Load miss, core 1 is owner ===");
+    // cpu_load(0, 32'hCAFE_0000);
+    // wait_for_cpu_resp(50);
+    // wait_cycles(2);
+
     
 
-    // Suppose the cpu sends another request when the directory controller is doing stuff
-    
-
-end
+    end
 
 // ================ Optional Continuous Monitor ================
 // $monitor fires automatically whenever a listed signal changes

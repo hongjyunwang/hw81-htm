@@ -29,11 +29,11 @@ module directory_controller #(
 
     // Output to L1 cache
     output reg l1_signal_o, // Handshake: Ready signal for data, meaning controller finished its tasks (I think this is the ACK?)
-    output reg [CORE_ID_BITS-1:0] l1_core_o, // Target core for data
+    output reg [NUM_CORES-1:0] l1_core_o, // Target core for data
     output reg [(8*CACHE_LINE_SIZE)-1:0] l1_data_o, // Fetched complete cache line
     output reg [1:0] l1_dg_signal_o, // Downgrade signal
     // l1_dg_signal_o: 00 -> no signal, 01 -> LD_MISS (downgrade to S), 10 -> SD_MISS (invalidate), 11 -> SD_HIT (invalidate)
-    output reg [CORE_ID_BITS-1:0] l1_dg_core_o, // Target core for invalidate signal
+    output reg [NUM_CORES-1:0] l1_dg_core_o, // Target core for invalidate signal
     output wire [ADDR_WIDTH-1:0] l1_dg_addr_o, // Target address to be downgraded
 
     // Output to L2    
@@ -107,7 +107,10 @@ reg [ENTRY_WIDTH-1:0] cur_entry; // store Snapshot of the directory entry taken 
 reg [LINE_WIDTH-1:0] fetched_line; // store Cache line returned from memory
 
 wire [2:0] cur_state = cur_entry[STATE_HI:STATE_LO]; // current directory entry's state bits
-wire [NUM_CORES-1:0] cur_pi = cur_entry[NUM_CORES-1:0]; // curren directory entry's tag bits
+wire [NUM_CORES-1:0] cur_pi = cur_entry[NUM_CORES-1:0]; // curren directory entry's pi bits
+wire [TAG_BITS-1:0] req_tag = req_addr[ADDR_WIDTH-1 : OFFSET_BITS+INDEX_BITS]; // tag bits of requested address
+wire [TAG_BITS-1:0] cur_tag = cur_entry[ENTRY_WIDTH-1 : ENTRY_WIDTH-TAG_BITS]; // tag bits stored in the current directory entry
+wire entry_valid = (cur_tag == req_tag) && (cur_state != STATE_I); // check if this entry is valid in the dc
 // Directory index: bits above the cache-line offset
 wire [INDEX_BITS-1:0] dir_idx = req_addr[OFFSET_BITS + INDEX_BITS - 1 : OFFSET_BITS];
 
@@ -196,7 +199,7 @@ always @(posedge clk_i or posedge reset_i) begin
 
             S_LD_MISS: begin
                 // Check whether the requested block is in the M state in another cache (the owner)
-                if(cur_entry[CORE_ID_BITS-1:0] == 0) begin
+                if(!entry_valid || cur_pi == 0) begin // no valid entry or no owner
                     // No owner, fetch data from L2
                     l2_req_o <= 1;
                     l2_we_o <= 0; // read request
@@ -210,31 +213,40 @@ always @(posedge clk_i or posedge reset_i) begin
                     state <= S_WAITING_OWNER;
                 end
 
-                $display("[DC S_LD_MISS] cur_pi=%b cur_state=%b -> %s",
+                $display("[DC S_LD_MISS] directory entry report. cur_pi=%b cur_state=%b -> %s",
                     cur_entry[NUM_CORES-1:0],
                     cur_entry[STATE_HI:STATE_LO],
                     (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
             end
             S_SD_MISS: begin
                 // Check whether the requested block is in the M state in another cache (the owner)
-                if(cur_entry[CORE_ID_BITS-1:0] == 0) begin
+                if(!entry_valid || cur_pi == 0) begin // no valid entry or no owner
                     // No owner, fetch data from L2
                     l2_req_o <= 1;
                     l2_we_o <= 1; // write request
                     mem_addr_o <= req_addr;
                     state <= S_WAITING_L2;
+                    $display("[DC S_SD_MISS] no owner. directory entry report. cur_pi=%b cur_state=%b -> %s",
+                        cur_entry[NUM_CORES-1:0],
+                        cur_entry[STATE_HI:STATE_LO],
+                        (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
+
                     $display("[DC S_SD_MISS] transitioning to S_WAITING_L2");
                 end else begin
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
                     l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
                     l1_dg_signal_o <= 2'b10; // downgrade to I
                     state <= S_WAITING_OWNER;
+
+                    $display("[DC S_SD_MISS] owner exists. directory entry report. cur_pi=%b cur_state=%b -> %s",
+                        cur_entry[NUM_CORES-1:0],
+                        cur_entry[STATE_HI:STATE_LO],
+                        (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
+
+                    $display("[DC S_SD_MISS] transitioning to S_WAITING_OWNER");
                 end
 
-                $display("[DC S_SD_MISS] cur_pi=%b cur_state=%b -> %s",
-                    cur_entry[NUM_CORES-1:0],
-                    cur_entry[STATE_HI:STATE_LO],
-                    (cur_entry[NUM_CORES-1:0] == 0) ? "no owner, fetching from L2" : "owner exists, sending downgrade");
+                
             end
 
             S_SD_HIT: begin
@@ -247,11 +259,17 @@ always @(posedge clk_i or posedge reset_i) begin
                     directory[dir_idx][NUM_CORES-1:0] <= req_core;
                     directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
                     state <= S_IDLE;
+
+                    $display("[DC S_SD_HIT] No other sharers. pi: %b -> %b, state: %b -> M (upgrade only)",
+                        cur_pi, req_core, cur_entry[STATE_HI:STATE_LO]);
                 end else begin
                     // Invalidate all other sharers
                     l1_dg_core_o <= cur_pi & ~req_core; // target cores (everyone except requester)
                     l1_dg_signal_o <= 2'b11; // SD_HIT invalidate
                     state <= S_WAITING_OWNER;
+
+                    $display("[DC S_SD_HIT] Invalidating sharers. pi=%b, invalidating cores=%b, keeping requester=%b",
+                        cur_pi, cur_pi & ~req_core, req_core);
                 end
             end
 
@@ -275,6 +293,9 @@ always @(posedge clk_i or posedge reset_i) begin
                             mem_addr_o <= req_addr;
                             directory[dir_idx][NUM_CORES-1:0]    <= cur_pi | req_core;
                             directory[dir_idx][STATE_HI:STATE_LO] <= STATE_S;
+
+                            $display("[DC S_WAITING_OWNER] Done. dir[%0d]: pi=%b -> %b, state -> S",
+                                dir_idx, cur_pi, cur_pi | req_core);
                         end
                         REQ_SD_MISS: begin
                             // Owner evicted, requester becomes sole M owner
@@ -284,12 +305,18 @@ always @(posedge clk_i or posedge reset_i) begin
                             mem_addr_o <= req_addr;
                             directory[dir_idx][NUM_CORES-1:0]    <= req_core;
                             directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
+
+                            $display("[DC S_WAITING_OWNER] Done. dir[%0d]: pi=%b -> %b, state -> S",
+                                dir_idx, cur_pi, cur_pi | req_core);
                         end
                         REQ_SD_HIT: begin
                             // No data forwarding needed — requester already has the data
                             // Just upgrade directory and let requester know it can proceed
                             directory[dir_idx][NUM_CORES-1:0] <= req_core;
                             directory[dir_idx][STATE_HI:STATE_LO] <= STATE_M;
+
+                            $display("[DC S_WAITING_OWNER] Done. dir[%0d]: pi=%b -> %b, state -> S",
+                                dir_idx, cur_pi, cur_pi | req_core);
                         end
                     endcase
 
@@ -314,12 +341,14 @@ always @(posedge clk_i or posedge reset_i) begin
                     state <= S_IDLE;
 
                     $display("[S_WAITING_L2] Acquired data from L2");
+                    $display("[S_WAITING_L2] Done. dir[%0d]: pi=%b state=%s",
+                        dir_idx, req_core,
+                        (req_type == REQ_SD_MISS) ? "M" : "S");
                 end else begin
                     state <= S_WAITING_L2;
                     $display("[S_WAITING_L2] Still Waiting");
                 end
             end
-
 
 
             default: state <= S_IDLE;

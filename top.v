@@ -35,9 +35,9 @@ module top #(
 // Naming for some of the wires: sender_receiver_wireName
 wire dc_l1_data_signal;
 wire [(8*CACHE_LINE_SIZE)-1:0] dc_l1_data;
-wire [CORE_ID_BITS-1:0] dc_l1_data_core;
+wire [NUM_CORES-1:0] dc_l1_data_core; 
 wire [1:0] dg_signal;
-wire [CORE_ID_BITS-1:0] dg_core;
+wire [NUM_CORES-1:0] dg_core;
 wire [ADDR_WIDTH-1:0] dg_addr;
 
 wire l1_dc_signal;
@@ -65,7 +65,7 @@ l1 #(.CORE_ID(0), .NUM_CORES(NUM_CORES), .CORE_ID_BITS(CORE_ID_BITS)) l1_inst (
     .reset_i(rst),
 
     // From CPU (gated by core select)
-    .cpu_signal_i(cpu_req_valid),
+    .cpu_signal_i(cpu_req_valid), // cpu sent down a request
     .addr_i(cpu_addr),
     .req_i(cpu_req),
     .core_i(cpu_core),
