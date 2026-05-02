@@ -16,7 +16,6 @@
 module l1 #(
     parameter CORE_ID = 0,
     parameter NUM_CORES = 2,
-    parameter CORE_ID_BITS = 1,
 
     parameter CACHE_ENTRIES_PER_CORE = 32, // 32 cache entries per core
     parameter CACHE_LINE_SIZE = 64, // 64 bytes per cache line
@@ -29,7 +28,7 @@ module l1 #(
     input wire cpu_signal_i, // Handshake: a real cpu request is present
     input [ADDR_WIDTH-1:0] addr_i, // address from CPU request
     input req_i, // 0: ld, 1: sd
-    input [CORE_ID_BITS-1:0] core_i, // The requesting core
+    input [NUM_CORES-1:0] core_i, // The requesting core (ONE HOT ONE HOT ONE HOT)
 
     // Input from the directory controller
     input dc_signal_i, // Handshake: signaled when data is sent in from the directory controller
@@ -85,9 +84,15 @@ localparam [2:0] STATE_I = 3'b001; // Invalid
 localparam [2:0] STATE_S = 3'b010; // Shared
 localparam [2:0] STATE_M = 3'b100; // Modified
 
+// ================ Downgrade type encoding ================
+localparam [1:0] LD_MISS_DG = 2'b01;
+localparam [1:0] SD_MISS_DG = 2'b10;
+localparam [1:0] SD_HIT_DG = 2'b11;
+
 // ================ FSM States ================
-localparam L1_IDLE = 1'b0; // Ready to accept a new CPU request
-localparam L1_WAIT = 1'b1; // Waiting on directory to service a miss
+localparam L1_IDLE = 2'b00; // Ready to accept a new CPU request
+localparam L1_WAIT = 2'b01; // Waiting on directory to service a miss
+localparam L1_DG = 2'b10;
 
 // ================ Internal Storage (Cache Line Entries) ================
 // [tag bits | state bits | data bits]
@@ -95,7 +100,7 @@ reg [CACHE_ENTRY_BITS-1:0] entries [CACHE_ENTRIES_PER_CORE-1:0];
 
 // ================ FSM State Register ================
 // Essentially makes L1 accesses blocking for each core
-reg l1_state;
+reg[1:0] l1_state;
 
 // ================ Latches ================
 // Held stable for the entire L1_WAIT period
@@ -111,7 +116,7 @@ wire [OFFSET_BITS-1:0] offset = addr_i & OFFSET_MASK;
 
 // ================ Wiring to Directory Controller ================
 assign addr_o = addr_i;
-assign core_o = 1 << core_i;
+assign core_o = core_i;
 
 // ================ Hit Detection ================
 wire [2:0] cached_state = entries[index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3];
@@ -121,7 +126,6 @@ wire hit = (entries[index][CACHE_ENTRY_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS] == ta
 
 // CPU can issue a new request only when IDLE
 assign cpu_ready_o = (l1_state == L1_IDLE);
-
 
 
 // ================ Combinational Block ================
@@ -149,8 +153,9 @@ end
 
 integer j;
 wire [INDEX_BITS-1:0] dg_index = (l1_dg_addr_i & INDEX_MASK) >> OFFSET_BITS;
-assign l1_dg_ack_o = dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0); // driven on 
-assign l2_data_o = (dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0)) ? entries[dg_index][LINE_WIDTH-1:0] : 0; // driven on downgrade signal
+assign l2_data_o = (dg_signal_i && ((l1_dg_core_i & core_i) != 0)) ? entries[dg_index][LINE_WIDTH-1:0] : 0; // driven on downgrade signal
+reg l1_dg_ack_reg;
+assign l1_dg_ack_o = l1_dg_ack_reg;
 // ================ Sequential Block ================
 always @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
@@ -184,7 +189,7 @@ always @(posedge clk_i or posedge reset_i) begin
                         latched_tags <= tags;
                         latched_req <= req_i;
                         latched_coh_req <= coh_req_o;
-                        
+
                         // Signal directory to take action
                         dc_signal_o <= 1;
 
@@ -198,7 +203,7 @@ always @(posedge clk_i or posedge reset_i) begin
             L1_WAIT: begin
                 // Block all new CPU requests until the miss is resolved
                 // dc_signal_i should only be sent in L1_WAIT state
-                if (((l1_core_i & (1 << core_i)) != 0) && dc_signal_i) begin
+                if (((l1_core_i & core_i) != 0) && dc_signal_i) begin
 
                     // Write in fetched data or stored data if store hit
                     entries[latched_index][LINE_WIDTH-1:0] <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i;
@@ -212,26 +217,50 @@ always @(posedge clk_i or posedge reset_i) begin
                     cpu_data_o <= (latched_coh_req == REQ_SD_HIT) ? entries[latched_index][LINE_WIDTH-1:0] : l1_data_i; // Pass in fetched data or stored data if store hit
                     // Ackowledge complete state downgrade
                     l1_state <= L1_IDLE;
+
+                    $display("[L1 seq - L1_WAIT] Received directory controller signal dc_signal_i=%b", dc_signal_i);
+                end
+
+                // Received downgrade signal
+                // Confirm that the invalidate signal is sent and core_i is in l1_dg_core_i
+                if(dg_signal_i && ((l1_dg_core_i & core_i) != 0)) begin
+                    l1_state <= L1_DG;
+                    $display("[L1 seq - L1_WAIT] Received downgrade dg_signal_i=%b", dg_signal_i);
+                end
+            end
+
+            L1_DG: begin
+                // Downgrade 
+                // If the cpu issued a write in the same clock cycle, do not downgrade
+                if (cpu_signal_i && req_i == STORE_REQ) begin
+                    // go back to waiting
+                    l1_state <= L1_WAIT;
+
+                    $display("[L1 seq - L1_DG] Downgrade pending on cpu requested store request cpu_signal_i=%b req_i=%b", cpu_signal_i, req_i);
+                end
+                else begin
+                    // only downgrade when there is 
+                    case (dg_signal_i)
+                        LD_MISS_DG: begin
+                            // downgrade to S
+                            entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_S;
+                        end
+                        SD_MISS_DG: begin
+                            // downgrade to I
+                            entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_I;
+                        end
+                        SD_HIT_DG: begin
+                            // downgrade to I
+                            entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_I;
+                        end
+                    endcase
+
+                    // acknowledgte downgrade completed
+                    l1_dg_ack_reg <= dg_signal_i && ((l1_dg_core_i & core_i) != 0);;
+                    $display("[L1 seq - L1_DG] Downgrade completed", cpu_signal_i, req_i);
                 end
             end
         endcase
-
-        // Downgrade and writeback operations
-        // Confirm that the invalidate signal is sent and core_i is in l1_dg_core_i
-        if (dg_signal_i && ((l1_dg_core_i & (1 << core_i)) != 0)) begin
-            if(dg_signal_i == 2'b01) begin // LD_MISS
-                // downgrade to S
-                entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_S;
-            end
-            if(dg_signal_i == 2'b10) begin // SD_MISS Invalidate
-                // downgrade to I
-                entries[dg_index][CACHE_ENTRY_BITS-TAG_BITS-1 : CACHE_ENTRY_BITS-TAG_BITS-3] <= STATE_I;
-            end
-            if(dg_signal_i == 2'b11) begin // SD_HIT Invalidate
-
-            end
-
-        end
     end
 end
 

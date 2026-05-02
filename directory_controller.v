@@ -2,7 +2,6 @@
 
 module directory_controller #(
     parameter NUM_CORES = 2,
-    parameter CORE_ID_BITS = 1, // number of bits representing cores (2^N cores total)
 
     parameter CACHE_ENTRIES_PER_CORE = 32,
     parameter CACHE_LINE_SIZE = 64, // 64 bytes per cache line
@@ -36,7 +35,7 @@ module directory_controller #(
     output reg [NUM_CORES-1:0] l1_dg_core_o, // Target core for invalidate signal
     output wire [ADDR_WIDTH-1:0] l1_dg_addr_o, // Target address to be downgraded
 
-    // Output to L2    
+    // Output to L2
     output reg l2_req_o, // Making downward memory request
     output reg l2_we_o, // 1 = write req, 0 = read req
     output reg [ADDR_WIDTH-1:0] mem_addr_o, // Data address to fetch
@@ -65,11 +64,11 @@ localparam [2:0] STATE_M = 3'b100; // Modified
 
 
 // ================ Directory Entry Layout ================
-// [tag (20 bits) | state (3 bits) | Π presence vector (CORE_ID_BITS bits)]
-localparam ENTRY_WIDTH = TAG_BITS + 3 + CORE_ID_BITS;
+// [tag (20 bits) | state (3 bits) | Π presence vector (NUM_CORES bits)]
+localparam ENTRY_WIDTH = TAG_BITS + 3 + NUM_CORES;
 localparam T_IDX = NUM_CORES;
-localparam STATE_HI = CORE_ID_BITS + 2;
-localparam STATE_LO = CORE_ID_BITS;
+localparam STATE_HI = NUM_CORES + 2;
+localparam STATE_LO = NUM_CORES;
 
 // ================ Request Types ================
 localparam REQ_LD_HIT = 3'b000;
@@ -154,7 +153,6 @@ always @(posedge clk_i or posedge reset_i) begin
         // transaction bit-vector tracking (tx_begin_i / tx_end_i)
 
         case (state)
-
             S_IDLE: begin
                 if (l1_signal_i) begin
                     // Latch the request fields stably for the rest of the FSM
@@ -208,7 +206,7 @@ always @(posedge clk_i or posedge reset_i) begin
                     $display("[DC S_LD_MISS] transitioning to S_WAITING_L2");
                 end else begin
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
-                    l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
+                    l1_dg_core_o <= cur_entry[NUM_CORES-1:0];
                     l1_dg_signal_o <= 2'b01; // downgrade to S
                     state <= S_WAITING_OWNER;
                 end
@@ -234,7 +232,7 @@ always @(posedge clk_i or posedge reset_i) begin
                     $display("[DC S_SD_MISS] transitioning to S_WAITING_L2");
                 end else begin
                     // There is an owner, owner downgrades its L1 state to S (send out invalidate)
-                    l1_dg_core_o <= cur_entry[CORE_ID_BITS-1:0];
+                    l1_dg_core_o <= cur_entry[NUM_CORES-1:0];
                     l1_dg_signal_o <= 2'b10; // downgrade to I
                     state <= S_WAITING_OWNER;
 
@@ -274,9 +272,11 @@ always @(posedge clk_i or posedge reset_i) begin
             end
 
             S_WAITING_OWNER: begin
+                // downgrade
                 l1_dg_signal_o <= (req_type == REQ_SD_MISS) ? 2'b10 : (req_type == REQ_SD_HIT)  ? 2'b11 : 2'b01; // determine signal type
                 l1_dg_core_o   <= cur_pi & ~req_core;
                 
+                // downgrade has been completed!
                 if (l1_dg_ack_i) begin
                     l1_dg_signal_o <= 2'b00;
 
@@ -340,10 +340,7 @@ always @(posedge clk_i or posedge reset_i) begin
  
                     state <= S_IDLE;
 
-                    $display("[S_WAITING_L2] Acquired data from L2");
-                    $display("[S_WAITING_L2] Done. dir[%0d]: pi=%b state=%s",
-                        dir_idx, req_core,
-                        (req_type == REQ_SD_MISS) ? "M" : "S");
+                    $display("[S_WAITING_L2] Acquired data from L2, done. dir[%0d]: pi=%b state=%s", dir_idx, req_core, (req_type == REQ_SD_MISS) ? "M" : "S");
                 end else begin
                     state <= S_WAITING_L2;
                     $display("[S_WAITING_L2] Still Waiting");

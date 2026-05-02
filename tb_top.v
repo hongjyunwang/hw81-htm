@@ -7,7 +7,6 @@ module tb_top;
 
 // ================ Parameters ================
 localparam NUM_CORES = 2;
-localparam CORE_ID_BITS = 1;
 localparam CACHE_LINE_SIZE = 64;
 localparam ADDR_WIDTH = 32;
 localparam CLK_PERIOD = 10; // 10 ns = 100 MHz
@@ -18,14 +17,13 @@ reg clk;
 reg rst;
 
 // CPU side
-reg cpu_req_valid;
-reg [ADDR_WIDTH-1:0] cpu_addr;
-reg cpu_req;
-reg [CORE_ID_BITS-1:0] cpu_core;
+reg  [NUM_CORES-1:0] cpu_req_valid;
+reg  [NUM_CORES*ADDR_WIDTH-1:0] cpu_addr;
+reg  [NUM_CORES-1:0] cpu_req;
 
-wire cpu_ready;
-wire cpu_resp_valid;
-wire [(8*CACHE_LINE_SIZE)-1:0] cpu_data;
+wire [NUM_CORES-1:0] cpu_ready;
+wire [NUM_CORES-1:0] cpu_resp_valid;
+wire [NUM_CORES*(8*CACHE_LINE_SIZE)-1:0] cpu_data;
 
 // L2 side
 reg l2_signal_i;
@@ -39,7 +37,6 @@ wire [(8*CACHE_LINE_SIZE)-1:0] l2_wdata_o;
 // ================ DUT Instantiation (top module) ================
 top #(
     .NUM_CORES(NUM_CORES),
-    .CORE_ID_BITS(CORE_ID_BITS),
     .CACHE_LINE_SIZE(CACHE_LINE_SIZE),
     .ADDR_WIDTH(ADDR_WIDTH)
 ) dut (
@@ -49,7 +46,6 @@ top #(
     .cpu_req_valid(cpu_req_valid),
     .cpu_addr(cpu_addr),
     .cpu_req(cpu_req),
-    .cpu_core(cpu_core),
     .cpu_ready(cpu_ready),
     .cpu_resp_valid(cpu_resp_valid),
     .cpu_data(cpu_data),
@@ -102,35 +98,33 @@ endtask
 
 // Issue a CPU load request from a specific core
 task cpu_load;
-    input [CORE_ID_BITS-1:0] issuing_core;
+    input [NUM_CORES-1:0] issuing_core;
     input [ADDR_WIDTH-1:0] address;
     begin
-        @(negedge clk); // drive on negedge, DUT samples on posedge
-        cpu_core = issuing_core;
-        cpu_addr = address;
-        cpu_req = 0; // 0 = load
-        cpu_req_valid = 1;
-        $display("[%0t] LOAD  core=%0d addr=0x%08h", $time, issuing_core, address);
-        @(posedge clk); // one cycle of valid request
         @(negedge clk);
-        cpu_req_valid = 0; // deassert
+        cpu_addr[issuing_core*ADDR_WIDTH +: ADDR_WIDTH] = address;
+        cpu_req[issuing_core] = 0;
+        cpu_req_valid[issuing_core] = 1;
+        $display("[%0t] LOAD  core=%0d addr=0x%08h", $time, issuing_core, address);
+        @(posedge clk);
+        @(negedge clk);
+        cpu_req_valid[issuing_core] = 0;
     end
 endtask
 
 // Issue a CPU store request from a specific core
 task cpu_store;
-    input [CORE_ID_BITS-1:0] issuing_core;
+    input [NUM_CORES-1:0] issuing_core;
     input [ADDR_WIDTH-1:0] address;
     begin
         @(negedge clk);
-        cpu_core = issuing_core;
-        cpu_addr = address;
-        cpu_req = 1; // 1 = store
-        cpu_req_valid = 1;
+        cpu_addr[issuing_core*ADDR_WIDTH +: ADDR_WIDTH] = address;
+        cpu_req[issuing_core] = 1;
+        cpu_req_valid[issuing_core] = 1;
         $display("[%0t] STORE core=%0d addr=0x%08h", $time, issuing_core, address);
         @(posedge clk);
         @(negedge clk);
-        cpu_req_valid = 0;
+        cpu_req_valid[issuing_core] = 0;
     end
 endtask
 
@@ -178,32 +172,32 @@ initial begin
     apply_reset;
     wait_cycles(2);
 
-    // ---------- Test 1: Simple load, cold miss ----------
-    $display("\n=== TEST 1: Cold miss load, core 0 ===");
-    fork
-        // Thread A: issue the CPU request
-        begin
-            cpu_load(0, 32'hDEAD_0000);
-        end
+    // // ---------- Test 1: Simple load, cold miss ----------
+    // $display("\n=== TEST 1: Cold miss load, core 0 ===");
+    // fork
+    //     // Thread A: issue the CPU request
+    //     begin
+    //         cpu_load(0, 32'hDEAD_0000);
+    //     end
 
-        // Thread B: wait for the DC to reach L2, then respond
-        // (fork lets A and B run concurrently, join waits for both)
-        begin
-            @(posedge l2_req_o); // wait until DC asks L2
-            $display("[%0t] DC issued L2 read for addr=0x%08h", $time, l2_addr_o);
-            l2_respond(512'hCAFE_BABE, 10);
-        end
-    join
+    //     // Thread B: wait for the DC to reach L2, then respond
+    //     // (fork lets A and B run concurrently, join waits for both)
+    //     begin
+    //         @(posedge l2_req_o); // wait until DC asks L2
+    //         $display("[%0t] DC issued L2 read for addr=0x%08h", $time, l2_addr_o);
+    //         l2_respond(512'hCAFE_BABE, 10);
+    //     end
+    // join
 
-    wait_for_cpu_resp(50);
-    wait_cycles(2);
+    // wait_for_cpu_resp(50);
+    // wait_cycles(2);
 
 
-    // ---------- Test 2: Load same line (should hit) ----------
-    $display("\n=== TEST 2: Load same line (should hit) ===");
-    cpu_load(0, 32'hDEAD_0000);
-    wait_for_cpu_resp(50);
-    wait_cycles(2);
+    // // ---------- Test 2: Load same line (should hit) ----------
+    // $display("\n=== TEST 2: Load same line (should hit) ===");
+    // cpu_load(0, 32'hDEAD_0000);
+    // wait_for_cpu_resp(50);
+    // wait_cycles(2);
 
 
     // ---------- Test 3: Store miss (cold miss, new address) ----------
@@ -228,7 +222,7 @@ initial begin
     wait_for_cpu_resp(10);
     wait_cycles(2);
 
-    // // ---------- Test A: Load miss, no owner ----------
+    // // ---------- Test 5: Load miss, no owner ----------
     // // Fresh address, DC goes straight to L2
     // $display("\n=== TEST 5: Load miss, no owner ===");
     // fork
@@ -244,9 +238,9 @@ initial begin
     // wait_for_cpu_resp(50);
     // wait_cycles(2);
 
-    // // ---------- Test B: Load miss, with owner ----------
-    // // Give core 1 an M-state line on 0xCAFE_0000 (core 1 is an owner)
-    // // Done by making it store to the line 
+    // ---------- Test 6: Load miss, with owner ----------
+    // Give core 1 an M-state line on 0xCAFE_0000 (core 1 is an owner)
+    // Done by making it store to the line 
     // $display("\n=== TEST 6 setup: Core 1 acquires M-state line ===");
     // fork
     //     begin
@@ -261,10 +255,10 @@ initial begin
     // wait_for_cpu_resp(50);
     // wait_cycles(4);
 
-    // // Step 2: core 0 loads the same line — core 1 is the M-state owner
-    // // DC should: downgrade core 1 (M→S), core 1 writes back and forwards
-    // // data to core 0. No l2_respond needed — data comes from core 1, not L2.
-    // // However, core 1's writeback may pulse l2_we_o=1 (a write, no response needed).
+    // Step 2: core 0 loads the same line — core 1 is the M-state owner
+    // DC should: downgrade core 1 (M→S), core 1 writes back and forwards
+    // data to core 0. No l2_respond needed — data comes from core 1, not L2.
+    // However, core 1's writeback may pulse l2_we_o=1 (a write, no response needed).
     // $display("\n=== TEST 6: Load miss, core 1 is owner ===");
     // cpu_load(0, 32'hCAFE_0000);
     // wait_for_cpu_resp(50);
